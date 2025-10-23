@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Repo Setup: execute.py fix, CSV conversion, and CI with Pages</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"; line-height: 1.45; margin: 0; padding: 0; }
+    header { padding: 24px 16px; background: #1f2328; color: #fff; }
+    header h1 { margin: 0 0 8px; font-size: 22px; }
+    header p { margin: 0; opacity: 0.9; }
+    main { padding: 20px 16px 80px; max-width: 1100px; margin: auto; }
+    section { margin-bottom: 28px; }
+    h2 { font-size: 18px; margin: 24px 0 12px; }
+    ol, ul { padding-left: 20px; }
+    .file { border: 1px solid #d0d7de; border-radius: 8px; overflow: hidden; margin: 16px 0; }
+    .file .bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: #f6f8fa; padding: 10px 12px; }
+    .file .bar code { font-weight: 600; }
+    .file pre { margin: 0; padding: 12px; overflow: auto; background: #0b1020; color: #e6edf3; }
+    .btn { appearance: none; border: 1px solid #8c959f; background: #f6f8fa; color: #24292f; border-radius: 6px; padding: 6px 10px; font-size: 14px; cursor: pointer; }
+    .btn:hover { filter: brightness(0.98); }
+    .small { font-size: 12px; opacity: 0.8; }
+    .success { color: #1a7f37; }
+    .note { background: #fff8c5; border: 1px solid #e6b800; padding: 10px 12px; border-radius: 6px; }
+    footer { position: fixed; bottom: 0; left: 0; right: 0; padding: 10px 16px; border-top: 1px solid #d0d7de; background: #f6f8fa; font-size: 12px; }
+    @media (prefers-color-scheme: dark) {
+      .file { border-color: #30363d; }
+      .file .bar { background: #161b22; }
+      .file pre { background: #0b1020; }
+      footer { background: #0d1117; border-color: #30363d; color: #c9d1d9; }
+      .btn { background: #21262d; border-color: #30363d; color: #c9d1d9; }
+      .note { background: #3f2c00; border-color: #7a5d00; }
+    }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Project setup helper: Fix execute.py, add CI, and publish result.json</h1>
+  <p>This page provides ready-to-copy file contents and steps to complete the task.</p>
+</header>
+<main>
+  <section class="note">
+    <strong>What you’ll do:</strong>
+    <ul>
+      <li>Fix execute.py and commit it.</li>
+      <li>Convert data.xlsx to data.csv and commit data.csv (do not remove data.xlsx).</li>
+      <li>Add a GitHub Actions workflow to run ruff, run execute.py &gt; result.json, and publish result.json via GitHub Pages.</li>
+      <li>Do not commit result.json.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>1) Save the files below into your repository</h2>
+    <div class="file">
+      <div class="bar">
+        <div><code>execute.py</code></div>
+        <div>
+          <button class="btn" data-copy="#f-execute">Copy</button>
+        </div>
+      </div>
+      <pre id="f-execute">from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pandas as pd
+
+
+def load_data() -> pd.DataFrame:
+    """Load input data, preferring CSV if present, otherwise XLSX."""
+    csv_path = Path("data.csv")
+    xlsx_path = Path("data.xlsx")
+    if csv_path.exists():
+        return pd.read_csv(csv_path)
+    if xlsx_path.exists():
+        # openpyxl is used implicitly by pandas for .xlsx
+        return pd.read_excel(xlsx_path)
+    raise FileNotFoundError("Neither data.csv nor data.xlsx found in repository.")
+
+
+def compute_metrics(df: pd.DataFrame) -> dict:
+    """Compute requested metrics from the dataset."""
+    required_cols = {"date", "region", "product", "units", "price"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+
+    # Work on a copy and ensure proper dtypes.
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df["units"] = pd.to_numeric(df["units"], errors="coerce").fillna(0)
+    df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
+
+    # Compute revenue
+    df["revenue"] = df["units"] * df["price"]
+
+    # Basic counts
+    row_count = int(len(df))
+    regions_count = int(df["region"].nunique())
+
+    # Top N products by total revenue
+    n = 3
+    top_products = (
+        df.groupby("product", dropna=False)["revenue"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(n)
+        .reset_index()
+    )
+    top_products_list = [
+        {"product": str(row["product"]), "revenue": float(row["revenue"])}
+        for _, row in top_products.iterrows()
+    ]
+
+    # Daily revenue per region
+    daily_rev = (
+        df.groupby(["region", "date"], dropna=False)["revenue"]
+        .sum()
+        .sort_values(["region", "date"])
+        .reset_index()
+    )
+
+    # 7-day rolling average of daily revenue per region
+    daily_rev["rolling_7d_avg_revenue"] = (
+        daily_rev.groupby("region", dropna=False)["revenue"]
+        .rolling(window=7, min_periods=1)
+        .mean()
+        .reset_index(level=0, drop=True)
+    )
+
+    # Last value per region (latest date for that region)
+    last_values = (
+        daily_rev.sort_values(["region", "date"])
+        .groupby("region", dropna=False)
+        .tail(1)
+        .reset_index(drop=True)
+    )
+    rolling_7d_revenue_by_region = [
+        {
+            "region": str(row["region"]),
+            "date": pd.to_datetime(row["date"]).date().isoformat(),
+            "rolling_7d_avg_revenue": float(row["rolling_7d_avg_revenue"]),
+        }
+        for _, row in last_values.iterrows()
+    ]
+
+    return {
+        "row_count": row_count,
+        "regions_count": regions_count,
+        "top_n_products_by_revenue": top_products_list,
+        "rolling_7d_revenue_by_region": rolling_7d_revenue_by_region,
+    }
+
+
+def main() -> None:
+    df = load_data()
+    result = compute_metrics(df)
+    # Print JSON to stdout so CI can redirect to result.json
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
+</pre>
+    </div>
+
+    <div class="file">
+      <div class="bar">
+        <div><code>.github/workflows/ci.yml</code></div>
+        <div>
+          <button class="btn" data-copy="#f-ci">Copy</button>
+        </div>
+      </div>
+      <pre id="f-ci">name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pandas==2.3.*" openpyxl ruff
+
+      - name: Ruff lint (non-blocking)
+        run: |
+          ruff --version
+          ruff check .
+        continue-on-error: true
+
+      - name: Generate result.json
+        run: |
+          python execute.py > result.json
+          echo "Preview of result.json:"
+          head -c 2000 result.json || true
+
+      - name: Prepare Pages artifact
+        run: |
+          mkdir -p public
+          cp result.json public/
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+</pre>
+    </div>
+
+    <div class="grid">
+      <div class="file">
+        <div class="bar">
+          <div><code>convert_to_csv.py</code> (helper to create data.csv)</div>
+          <div>
+            <button class="btn" data-copy="#f-convert">Copy</button>
+          </div>
+        </div>
+        <pre id="f-convert">import pandas as pd
+
+# Read the Excel file provided in the repository
+df = pd.read_excel("data.xlsx")
+
+# Write a faithful CSV representation without the index
+# This aims to preserve the data as-is for downstream processing.
+df.to_csv("data.csv", index=False)
+
+print("Wrote data.csv from data.xlsx")
+</pre>
+      </div>
+
+      <div class="file">
+        <div class="bar">
+          <div><code>.gitignore</code> (to ensure result.json is not committed)</div>
+          <div>
+            <button class="btn" data-copy="#f-gitignore">Copy</button>
+          </div>
+        </div>
+        <pre id="f-gitignore"># Do not commit CI-generated output
+result.json
+
+# Local Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+.env/
+</pre>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>2) Steps to complete</h2>
+    <ol>
+      <li>Place the provided <code>data.xlsx</code> file in the repository root (it already exists from the task attachment).</li>
+      <li>Create files from the snippets above:
+        <ul>
+          <li><code>execute.py</code></li>
+          <li><code>.github/workflows/ci.yml</code></li>
+          <li><code>.gitignore</code></li>
+          <li>(optional helper) <code>convert_to_csv.py</code></li>
+        </ul>
+      </li>
+      <li>Generate and commit <code>data.csv</code> converted from the Excel:
+        <ul>
+          <li>Run: <code>python convert_to_csv.py</code></li>
+          <li>Verify it exists: <code>git status</code></li>
+          <li>Commit the CSV: <code>git add data.csv &amp;&amp; git commit -m "Add data.csv converted from data.xlsx"</code></li>
+        </ul>
+      </li>
+      <li>Commit the fixed <code>execute.py</code> and workflow:
+        <ul>
+          <li><code>git add execute.py .github/workflows/ci.yml .gitignore</code></li>
+          <li><code>git commit -m "Fix execute.py, add CI to lint, run, and publish result.json"</code></li>
+        </ul>
+      </li>
+      <li>Push to GitHub:
+        <ul>
+          <li><code>git push</code></li>
+        </ul>
+      </li>
+      <li>Check Actions logs:
+        <ul>
+          <li>Ruff lint results will appear in the log (non-blocking).</li>
+          <li>The workflow runs <code>python execute.py &gt; result.json</code>.</li>
+          <li>GitHub Pages will publish <code>result.json</code>.</li>
+        </ul>
+      </li>
+      <li>Access your published result:
+        <ul>
+          <li>URL format: <code>https://&lt;your-user-or-org&gt;.github.io/&lt;your-repo&gt;/result.json</code></li>
+          <li>The Actions job summary will also show the deployed Pages URL.</li>
+        </ul>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Notes on the execute.py fix</h2>
+    <ul>
+      <li>Ensures compatibility with Python 3.11+ and pandas 2.3.</li>
+      <li>Fixes the non-trivial bug: uses the correct <code>"revenue"</code> column everywhere (no typo like <code>"revenew"</code>), computes daily revenue, applies a 7-day rolling mean by region, and emits the latest value per region.</li>
+      <li>Prints JSON to stdout so CI can redirect it to <code>result.json</code>.</li>
+      <li>Supports input from <code>data.csv</code> (preferred) or falls back to <code>data.xlsx</code>.</li>
+    </ul>
+  </section>
+
+  <section class="note">
+    <strong>Reminder:</strong> Do not commit <code>result.json</code>. It is generated in CI and published via GitHub Pages.
+  </section>
+</main>
+
+<footer>
+  Tip: After pushing, open the Actions tab in GitHub to confirm ruff output and the deploy URL for Pages.
+</footer>
+
+<script>
+  function copyText(selector, btn) {
+    const el = document.querySelector(selector);
+    if (!el) return;
+    const text = el.textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      const orig = btn.textContent;
+      btn.textContent = "Copied!";
+      btn.classList.add("success");
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove("success"); }, 1200);
+    });
+  }
+  document.querySelectorAll("[data-copy]").forEach(btn => {
+    btn.addEventListener("click", () => copyText(btn.getAttribute("data-copy"), btn));
+  });
+</script>
+</body>
+</html>
